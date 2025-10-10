@@ -1,7 +1,4 @@
-streamlit==1.38.0
-sounddevice==0.4.7
-soundfile==0.12.1
-openai-whisper==20231117
-numpy>=1.23.0
-torch>=2.0.0
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+pip install transformers sentencepiece
+pip install sounddevice soundfile git+https://github.com/openai/whisper.git 
 
