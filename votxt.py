@@ -2,152 +2,226 @@ import os
 import streamlit as st
 import sounddevice as sd
 import soundfile as sf
-import numpy as np
-import tempfile
-import time
 import whisper
+import tempfile
+import numpy as np
+import time
 from transformers import pipeline
-import uuid
 
-# CONFIG
+#CONFIG
+DURATION = 10
 SAMPLE_RATE = 16000
-MAX_DURATION = 180  # seconds
-FFMPEG_PATH = r"C:\ffmpeg\bin"
-DEVICE = "cuda"  # or "cpu"
+FFMPEG_PATH = r"C:\\ffmpeg\\bin"
+
 os.environ["PATH"] += os.pathsep + FFMPEG_PATH
 
-# ---- Streamlit UI ----
-st.title("🎙️ Voice to Text + Summarization")
-st.write("Record, Pause, Resume, Upload, and Save your voice instantly!")
 
-# ---- Session State Initialization ----
-if "is_recording" not in st.session_state:
-    st.session_state.is_recording = False
-if "pause" not in st.session_state:
-    st.session_state.pause = False
-if "recorded_audio" not in st.session_state:
-    st.session_state.recorded_audio = np.array([], dtype=np.float32)
-if "start_time" not in st.session_state:
-    st.session_state.start_time = 0
-if "elapsed_time" not in st.session_state:
-    st.session_state.elapsed_time = 0
-if "uploaded_done" not in st.session_state:
-    st.session_state.uploaded_done = False
+#STREAMLIT PAGE SETTINGS
+st.set_page_config(page_title="VoTXT - Voice to Text + Summarizer", layout="centered")
+st.title("🎙️ VoTXT - Voice to Text + Summarization")
+st.write("Record, upload, and transcribe your voice instantly using Whisper + Transformer Summarizer.")
 
-# Select Whisper model
-whisper_model_choice = st.selectbox("Choose Whisper Model", ["tiny", "base", "small", "medium", "large"])
+#SESSION STATE VARIABLES
+if "recording" not in st.session_state:
+    st.session_state.recording = False
+if "paused" not in st.session_state:
+    st.session_state.paused = False
+if "mode" not in st.session_state:
+    st.session_state.mode = None
+if "transcribed_text" not in st.session_state:
+    st.session_state.transcribed_text = ""
+if "recording_data" not in st.session_state:
+    st.session_state.recording_data = np.array([])
+if "summary_text" not in st.session_state:
+    st.session_state.summary_text = ""
 
-# ---- Upload Audio Section ----
-uploaded_audio = st.file_uploader("📤 Upload a Recorded Audio File", type=["wav", "mp3", "m4a"])
+ 
+#SIDEBAR SETTINGS 
+st.sidebar.header("Settings ⚙️")
+duration = st.sidebar.slider("Recording Duration (seconds)", 5, 180, DURATION)
+model_choice = st.sidebar.selectbox("Choose Whisper Model", ["tiny", "base", "small", "medium", "large"])
+max_summary_words = st.sidebar.slider("Summary Length (words)", 30, 200, 100)
+st.sidebar.markdown("---")
 
-def transcribe_and_summarize(file_path):
-    """Load Whisper, transcribe audio, summarize text using LLM."""
-    st.info("Loading Whisper model...")
-    model = whisper.load_model(whisper_model_choice, device=DEVICE)
-    st.success("Model loaded!")
+ 
+#MODE SELECTION 
+col1, col2 = st.columns(2)
+with col1:
+    if st.button("🎤 Record Mode"):
+        st.session_state.mode = "record"
+        st.session_state.recording = False
+        st.session_state.paused = False
+        st.session_state.transcribed_text = ""
+        st.session_state.recording_data = np.array([])
+        st.session_state.summary_text = ""
+with col2:
+    if st.button("📤 Upload Mode"):
+        st.session_state.mode = "upload"
+        st.session_state.recording = False
+        st.session_state.paused = False
+        st.session_state.transcribed_text = ""
+        st.session_state.recording_data = np.array([])
+        st.session_state.summary_text = ""
 
-    # Transcribe
-    st.info("Transcribing audio... ⏳")
-    result = model.transcribe(file_path)
-    transcript = result["text"]
+ 
+#RECORD MODE 
+if st.session_state.mode == "record":
+    st.subheader("🎙️ Record Audio")
 
-    st.subheader("Transcribed Text")
-    st.write(transcript)
-    st.download_button(
-        "📥 Download Transcription",
-        transcript,
-        "transcription.txt",
-        key=f"transcription_{uuid.uuid4()}"
-    )
+    #Record / Pause / Resume buttons
+    col_rec, col_pause, col_reset = st.columns(3)
+    with col_rec:
+        if st.button("▶️ Start Recording"):
+            st.session_state.recording = True
+            st.session_state.paused = False
+            st.session_state.recording_data = np.array([])
+            st.info(f"Recording for {duration} seconds...")
+            with st.spinner("Recording..."):
+                recording = sd.rec(int(duration * SAMPLE_RATE), samplerate=SAMPLE_RATE, channels=1)
+                sd.wait()
+                st.session_state.recording_data = recording
+            st.session_state.recording = False
 
-    # Summarize
-    if len(transcript.split()) < 90:
-        st.subheader("Summary")
-        st.write("Text is too short to summarize.")
-    else:
-        st.info("Summarizing text using local LLM... ⏳")
-        summarizer = pipeline(
-            "summarization",
-            model="facebook/bart-large-cnn",
-            device=0 if DEVICE == "cuda" else -1
-        )
-        summary = summarizer(
-            transcript,
-            max_length=220,
-            min_length=90,
-            do_sample=False
-        )[0]['summary_text']
-        st.subheader("Summary")
-        st.write(summary)
+    with col_pause:
+        if st.session_state.recording and not st.session_state.paused:
+            if st.button("⏸️ Pause"):
+                sd.stop()
+                st.session_state.paused = True
+                st.warning("Recording paused.")
+        elif st.session_state.paused:
+            if st.button("▶️ Resume"):
+                st.session_state.paused = False
+                st.info("Recording resumed.")
+                remaining_time = duration - len(st.session_state.recording_data) / SAMPLE_RATE
+                if remaining_time > 0:
+                    new_part = sd.rec(int(remaining_time * SAMPLE_RATE), samplerate=SAMPLE_RATE, channels=1)
+                    sd.wait()
+                    st.session_state.recording_data = np.concatenate((st.session_state.recording_data, new_part))
+                st.session_state.recording = False
+
+    with col_reset:
+        if st.button("🔄 Reset"):
+            st.session_state.recording = False
+            st.session_state.paused = False
+            st.session_state.recording_data = np.array([])
+            st.session_state.transcribed_text = ""
+            st.session_state.summary_text = ""
+            st.success("Recording reset!")
+
+    #After recording
+    if st.session_state.recording_data.size > 0:
+        temp_wav = tempfile.NamedTemporaryFile(delete=False, suffix=".wav")
+        sf.write(temp_wav.name, st.session_state.recording_data, SAMPLE_RATE)
+        st.audio(temp_wav.name)
+        st.success("✅ Recording complete!")
+
+        #Transcribe
+        st.info("Loading Whisper model... please wait ⏳")
+        model = whisper.load_model(model_choice)
+        st.info("Transcribing your audio...")
+
+        result = model.transcribe(temp_wav.name)
+        st.session_state.transcribed_text = result["text"]
+        st.success("✅ Transcription complete!")
+
+    #Show transcription
+    if st.session_state.transcribed_text:
+        st.subheader("📝 Transcribed Text:")
+        st.write(st.session_state.transcribed_text)
         st.download_button(
-            "📥 Download Summary",
-            summary,
-            "summary.txt",
-            key=f"summary_{uuid.uuid4()}"
+            label="📥 Download as TXT",
+            data=st.session_state.transcribed_text,
+            file_name="transcription.txt",
+            mime="text/plain"
         )
 
-# Handle uploaded audio
-if uploaded_audio is not None and not st.session_state.uploaded_done:
-    st.audio(uploaded_audio)
-    # Save uploaded file temporarily
-    temp_uploaded = tempfile.NamedTemporaryFile(delete=False, suffix=".wav")
-    temp_uploaded.write(uploaded_audio.read())
-    temp_uploaded.flush()
-    transcribe_and_summarize(temp_uploaded.name)
-    st.session_state.uploaded_done = True
+         
+        #SUMMARY GENERATOR         
+        st.markdown("---")
+        st.subheader("🧠 Generate Summary")
+        if st.button("✨ Summarize Text"):
+            with st.spinner("Generating summary using transformer model... ⏳"):
+                summarizer = pipeline("summarization", model="facebook/bart-large-cnn")
+                #Truncate text to avoid token overflow
+                input_text = st.session_state.transcribed_text[:3000]
+                summary = summarizer(
+                    input_text,
+                    max_length=max_summary_words,
+                    min_length=max(20, max_summary_words // 2),
+                    do_sample=False
+                )[0]["summary_text"]
+                st.session_state.summary_text = summary
+            st.success("✅ Summary generated!")
 
-# ---- Recording Buttons ----
-col1, col2, col3, col4 = st.columns(4)
-record_btn = col1.button("🎙️ Record", use_container_width=True)
-pause_btn = col2.button("⏸️ Pause", use_container_width=True)
-resume_btn = col3.button("▶️ Resume", use_container_width=True)
-save_btn = col4.button("💾 Save", use_container_width=True)
+        if st.session_state.summary_text:
+            st.write("###🧾 Summary:")
+            st.write(st.session_state.summary_text)
+            st.download_button(
+                label="📥 Download Summary as TXT",
+                data=st.session_state.summary_text,
+                file_name="summary.txt",
+                mime="text/plain"
+            )
 
-# Timer display
-st.session_state["timer_placeholder"] = st.empty()
-st.session_state["timer_placeholder"].text(f"⏱️ Recording: {int(st.session_state.elapsed_time)}s")
+ 
+#UPLOAD MODE 
+elif st.session_state.mode == "upload":
+    st.subheader("📤 Upload a Recorded Audio File")
+    uploaded_file = st.file_uploader("Choose an audio file", type=["wav", "mp3", "m4a"])
 
-# ---- Recording Logic ----
-def record_audio():
-    """Record audio in small blocks and append to buffer."""
-    block_size = 1  # seconds per capture
-    while st.session_state.is_recording and not st.session_state.pause:
-        audio_block = sd.rec(int(block_size * SAMPLE_RATE), samplerate=SAMPLE_RATE, channels=1, dtype="float32")
-        sd.wait()
-        st.session_state.recorded_audio = np.concatenate((st.session_state.recorded_audio, audio_block.flatten()))
-        st.session_state.elapsed_time = time.time() - st.session_state.start_time
-        st.session_state.elapsed_time = min(st.session_state.elapsed_time, MAX_DURATION)
-        st.session_state["timer_placeholder"].text(f"⏱️ Recording: {int(st.session_state.elapsed_time)}s")
-        if st.session_state.elapsed_time >= MAX_DURATION:
-            st.session_state.is_recording = False
-            break
+    if uploaded_file is not None:
+        st.audio(uploaded_file)
+        st.info("Transcribing your audio... please wait ⏳")
 
-# ---- Record Button ----
-if record_btn and not st.session_state.is_recording:
-    st.session_state.is_recording = True
-    st.session_state.pause = False
-    st.session_state.start_time = time.time() - st.session_state.elapsed_time
-    with st.spinner("Recording... Speak now! 🎤"):
-        record_audio()
+        #Save uploaded file to temp
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
+            tmp.write(uploaded_file.read())
+            temp_path = tmp.name
 
-# ---- Pause Button ----
-if pause_btn and st.session_state.is_recording:
-    st.session_state.pause = True
-    st.session_state.is_recording = False
-    st.info(f"⏸️ Recording paused at {int(st.session_state.elapsed_time)}s")
+        model = whisper.load_model(model_choice)
+        result = model.transcribe(temp_path)
+        st.session_state.transcribed_text = result["text"]
 
-# ---- Resume Button ----
-if resume_btn and not st.session_state.is_recording and st.session_state.pause:
-    st.session_state.pause = False
-    st.session_state.is_recording = True
-    st.session_state.start_time = time.time() - st.session_state.elapsed_time
-    st.success("▶️ Resumed recording!")
-    record_audio()
+        st.success("✅ Transcription complete!")
 
-# ---- Save Button ----
-if save_btn and len(st.session_state.recorded_audio) > 0:
-    temp_wav = tempfile.NamedTemporaryFile(delete=False, suffix=".wav")
-    sf.write(temp_wav.name, st.session_state.recorded_audio, SAMPLE_RATE)
-    st.audio(temp_wav.name)
-    st.success(f"💾 Saved Recording: {temp_wav.name}")
-    transcribe_and_summarize(temp_wav.name)
+    if st.session_state.transcribed_text:
+        st.subheader("📝 Transcribed Text:")
+        st.write(st.session_state.transcribed_text)
+        st.download_button(
+            label="📥 Download as TXT",
+            data=st.session_state.transcribed_text,
+            file_name="transcription.txt",
+            mime="text/plain"
+        )
+
+         
+        #SUMMARY GENERATOR         
+        st.markdown("---")
+        st.subheader("🧠 Generate Summary")
+        if st.button("✨ Summarize Text (Upload Mode)"):
+            with st.spinner("Generating summary using transformer model... ⏳"):
+                summarizer = pipeline("summarization", model="facebook/bart-large-cnn")
+                input_text = st.session_state.transcribed_text[:3000]
+                summary = summarizer(
+                    input_text,
+                    max_length=max_summary_words,
+                    min_length=max(20, max_summary_words // 2),
+                    do_sample=False
+                )[0]["summary_text"]
+                st.session_state.summary_text = summary
+            st.success("✅ Summary generated!")
+
+        if st.session_state.summary_text:
+            st.write("###🧾 Summary:")
+            st.write(st.session_state.summary_text)
+            st.download_button(
+                label="📥 Download Summary as TXT",
+                data=st.session_state.summary_text,
+                file_name="summary.txt",
+                mime="text/plain"
+            )
+
+ 
+#DEFAULT VIEW 
+else:
+    st.info("👆 Choose a mode above to start recording or uploading audio.")
